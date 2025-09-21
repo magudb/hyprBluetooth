@@ -9,24 +9,24 @@ import (
 )
 
 type BluetoothDevice struct {
-	MAC         string
-	Name        string
-	Connected   bool
-	Paired      bool
-	Trusted     bool
-	DeviceType  string
+	MAC        string
+	Name       string
+	Connected  bool
+	Paired     bool
+	Trusted    bool
+	DeviceType string
 }
 
 type Model struct {
-	devices           []BluetoothDevice
-	cursor            int
-	scanning          bool
-	selected          map[int]struct{}
-	width             int
-	height            int
-	bluetooth         *BluetoothManager
-	bluetoothEnabled  bool
-	bluetoothChecked  bool
+	devices          []BluetoothDevice
+	cursor           int
+	scanning         bool
+	selected         map[int]struct{}
+	width            int
+	height           int
+	bluetooth        *BluetoothManager
+	bluetoothEnabled bool
+	bluetoothChecked bool
 }
 
 type scanCompleteMsg struct {

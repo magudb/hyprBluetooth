@@ -24,7 +24,6 @@ type Model struct {
 	selected         map[int]struct{}
 	width            int
 	height           int
-	bluetooth        *BluetoothManager
 	bluetoothEnabled bool
 	bluetoothChecked bool
 }
@@ -126,20 +125,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseMsg:
-		switch msg.Type {
-		case tea.MouseWheelUp:
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		case tea.MouseWheelDown:
-			if m.cursor < len(m.devices)-1 {
-				m.cursor++
-			}
-		case tea.MouseLeft:
-			if msg.Y >= 3 && msg.Y < 3+len(m.devices) {
-				newCursor := msg.Y - 3
-				if newCursor >= 0 && newCursor < len(m.devices) {
-					m.cursor = newCursor
+		switch msg.Action {
+		case tea.MouseActionPress:
+			if msg.Button == tea.MouseButtonWheelUp {
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			} else if msg.Button == tea.MouseButtonWheelDown {
+				if m.cursor < len(m.devices)-1 {
+					m.cursor++
+				}
+			} else if msg.Button == tea.MouseButtonLeft {
+				if msg.Y >= 3 && msg.Y < 3+len(m.devices) {
+					newCursor := msg.Y - 3
+					if newCursor >= 0 && newCursor < len(m.devices) {
+						m.cursor = newCursor
+					}
 				}
 			}
 		}

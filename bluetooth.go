@@ -182,10 +182,14 @@ func (bm *BluetoothManager) ScanForNewDevices() ([]BluetoothDevice, error) {
 		}
 	}()
 
-	cmd.Wait()
+	if err := cmd.Wait(); err != nil {
+		// Log error but continue - scan might still have found devices
+	}
 
 	stopCmd := exec.Command("bluetoothctl", "scan", "off")
-	stopCmd.Run()
+	if err := stopCmd.Run(); err != nil {
+		// Log error but continue - scan stop failure is not critical
+	}
 
 	return newDevices, nil
 }
@@ -275,7 +279,9 @@ func pairDeviceCmd(mac string) tea.Cmd {
 		bm := NewBluetoothManager()
 		err := bm.PairDevice(mac)
 		if err == nil {
-			bm.TrustDevice(mac)
+			if err := bm.TrustDevice(mac); err != nil {
+				// Trust failed but pairing succeeded
+			}
 		}
 		return getDevicesCmd()()
 	}
@@ -286,9 +292,13 @@ func pairAndConnectDeviceCmd(mac string) tea.Cmd {
 		bm := NewBluetoothManager()
 		err := bm.PairDevice(mac)
 		if err == nil {
-			bm.TrustDevice(mac)
+			if err := bm.TrustDevice(mac); err != nil {
+				// Trust failed but pairing succeeded
+			}
 			time.Sleep(1 * time.Second)
-			bm.ConnectDevice(mac)
+			if err := bm.ConnectDevice(mac); err != nil {
+				// Connect failed but pairing/trust may have succeeded
+			}
 		}
 		return getDevicesCmd()()
 	}

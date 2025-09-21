@@ -1,0 +1,36 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.out
+
+# Build directories
+/build/
+/bin/
+/dist/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Dependency directories
+/vendor/
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Go specific
+*.test
+coverage.out
+
+# Bluetooth cache or temp files (if any)
+*.cache
+*.tmp
+hyprBluetooth

@@ -57,118 +57,159 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "q":
-			return m, tea.Quit
-
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-
-		case "down", "j":
-			if m.cursor < len(m.devices)-1 {
-				m.cursor++
-			}
-
-		case "enter", " ":
-			if len(m.devices) > 0 {
-				device := m.devices[m.cursor]
-				if device.Connected {
-					return m, disconnectDeviceCmd(device.MAC)
-				} else if device.Paired {
-					return m, connectDeviceCmd(device.MAC)
-				} else {
-					return m, pairAndConnectDeviceCmd(device.MAC)
-				}
-			}
-
-		case "s":
-			if !m.scanning {
-				m.scanning = true
-				return m, scanDevicesCmd()
-			}
-
-		case "r":
-			return m, getDevicesCmd()
-
-		case "d":
-			if len(m.devices) > 0 {
-				device := m.devices[m.cursor]
-				if device.Connected {
-					return m, disconnectDeviceCmd(device.MAC)
-				}
-			}
-
-		case "p":
-			if len(m.devices) > 0 {
-				device := m.devices[m.cursor]
-				if !device.Paired {
-					return m, pairDeviceCmd(device.MAC)
-				}
-			}
-
-		case "e":
-			if m.bluetoothChecked {
-				if m.bluetoothEnabled {
-					return m, disableBluetoothCmd()
-				} else {
-					return m, enableBluetoothCmd()
-				}
-			}
-
-		case "ctrl+r":
-			return m, tea.Batch(
-				getDevicesCmd(),
-				getBluetoothStatusCmd(),
-			)
-		}
+		return m.handleKeyMsg(msg)
 
 	case tea.MouseMsg:
-		switch msg.Action {
-		case tea.MouseActionPress:
-			if msg.Button == tea.MouseButtonWheelUp {
-				if m.cursor > 0 {
-					m.cursor--
-				}
-			} else if msg.Button == tea.MouseButtonWheelDown {
-				if m.cursor < len(m.devices)-1 {
-					m.cursor++
-				}
-			} else if msg.Button == tea.MouseButtonLeft {
-				if msg.Y >= 3 && msg.Y < 3+len(m.devices) {
-					newCursor := msg.Y - 3
-					if newCursor >= 0 && newCursor < len(m.devices) {
-						m.cursor = newCursor
-					}
-				}
-			}
-		}
+		return m.handleMouseMsg(msg)
 
 	case scanCompleteMsg:
 		m.scanning = false
 		m.devices = msg.devices
 
 	case deviceStatusMsg:
-		for i, device := range m.devices {
-			if device.MAC == msg.deviceMAC {
-				m.devices[i].Connected = msg.connected
-				break
-			}
-		}
-		return m, getDevicesCmd()
+		return m.handleDeviceStatusMsg(msg)
 
 	case []BluetoothDevice:
 		m.devices = msg
 
 	case bluetoothStatusMsg:
-		m.bluetoothEnabled = msg.enabled
-		m.bluetoothChecked = true
-		if msg.error == nil {
-			return m, getDevicesCmd()
-		}
+		return m.handleBluetoothStatusMsg(msg)
 	}
 
+	return m, nil
+}
+
+func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "q":
+		return m, tea.Quit
+
+	case "up", "k":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+
+	case "down", "j":
+		if m.cursor < len(m.devices)-1 {
+			m.cursor++
+		}
+
+	case "enter", " ":
+		return m.handleDeviceAction()
+
+	case "s":
+		if !m.scanning {
+			m.scanning = true
+			return m, scanDevicesCmd()
+		}
+
+	case "r":
+		return m, getDevicesCmd()
+
+	case "d":
+		return m.handleDisconnectAction()
+
+	case "p":
+		return m.handlePairAction()
+
+	case "e":
+		return m.handleBluetoothToggle()
+
+	case "ctrl+r":
+		return m, tea.Batch(
+			getDevicesCmd(),
+			getBluetoothStatusCmd(),
+		)
+	}
+
+	return m, nil
+}
+
+func (m Model) handleDeviceAction() (tea.Model, tea.Cmd) {
+	if len(m.devices) == 0 {
+		return m, nil
+	}
+
+	device := m.devices[m.cursor]
+	if device.Connected {
+		return m, disconnectDeviceCmd(device.MAC)
+	} else if device.Paired {
+		return m, connectDeviceCmd(device.MAC)
+	} else {
+		return m, pairAndConnectDeviceCmd(device.MAC)
+	}
+}
+
+func (m Model) handleDisconnectAction() (tea.Model, tea.Cmd) {
+	if len(m.devices) > 0 {
+		device := m.devices[m.cursor]
+		if device.Connected {
+			return m, disconnectDeviceCmd(device.MAC)
+		}
+	}
+	return m, nil
+}
+
+func (m Model) handlePairAction() (tea.Model, tea.Cmd) {
+	if len(m.devices) > 0 {
+		device := m.devices[m.cursor]
+		if !device.Paired {
+			return m, pairDeviceCmd(device.MAC)
+		}
+	}
+	return m, nil
+}
+
+func (m Model) handleBluetoothToggle() (tea.Model, tea.Cmd) {
+	if m.bluetoothChecked {
+		if m.bluetoothEnabled {
+			return m, disableBluetoothCmd()
+		} else {
+			return m, enableBluetoothCmd()
+		}
+	}
+	return m, nil
+}
+
+func (m Model) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch msg.Action {
+	case tea.MouseActionPress:
+		if msg.Button == tea.MouseButtonWheelUp {
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		} else if msg.Button == tea.MouseButtonWheelDown {
+			if m.cursor < len(m.devices)-1 {
+				m.cursor++
+			}
+		} else if msg.Button == tea.MouseButtonLeft {
+			if msg.Y >= 3 && msg.Y < 3+len(m.devices) {
+				newCursor := msg.Y - 3
+				if newCursor >= 0 && newCursor < len(m.devices) {
+					m.cursor = newCursor
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m Model) handleDeviceStatusMsg(msg deviceStatusMsg) (tea.Model, tea.Cmd) {
+	for i, device := range m.devices {
+		if device.MAC == msg.deviceMAC {
+			m.devices[i].Connected = msg.connected
+			break
+		}
+	}
+	return m, getDevicesCmd()
+}
+
+func (m Model) handleBluetoothStatusMsg(msg bluetoothStatusMsg) (tea.Model, tea.Cmd) {
+	m.bluetoothEnabled = msg.enabled
+	m.bluetoothChecked = true
+	if msg.error == nil {
+		return m, getDevicesCmd()
+	}
 	return m, nil
 }
 

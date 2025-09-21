@@ -11,6 +11,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+const bluetoothYes = "yes"
+
 type BluetoothManager struct{}
 
 func NewBluetoothManager() *BluetoothManager {
@@ -24,8 +26,8 @@ func (bm *BluetoothManager) GetDevices() ([]BluetoothDevice, error) {
 		return nil, fmt.Errorf("failed to get devices: %w", err)
 	}
 
-	var devices []BluetoothDevice
 	lines := strings.Split(string(output), "\n")
+	devices := make([]BluetoothDevice, 0, len(lines))
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -79,11 +81,11 @@ func (bm *BluetoothManager) GetDeviceInfo(mac string) (*BluetoothDevice, error) 
 		if strings.HasPrefix(line, "Name: ") {
 			device.Name = strings.TrimPrefix(line, "Name: ")
 		} else if strings.HasPrefix(line, "Connected: ") {
-			device.Connected = strings.TrimPrefix(line, "Connected: ") == "yes"
+			device.Connected = strings.TrimPrefix(line, "Connected: ") == bluetoothYes
 		} else if strings.HasPrefix(line, "Paired: ") {
-			device.Paired = strings.TrimPrefix(line, "Paired: ") == "yes"
+			device.Paired = strings.TrimPrefix(line, "Paired: ") == bluetoothYes
 		} else if strings.HasPrefix(line, "Trusted: ") {
-			device.Trusted = strings.TrimPrefix(line, "Trusted: ") == "yes"
+			device.Trusted = strings.TrimPrefix(line, "Trusted: ") == bluetoothYes
 		} else if strings.HasPrefix(line, "Icon: ") {
 			device.DeviceType = strings.TrimPrefix(line, "Icon: ")
 		}

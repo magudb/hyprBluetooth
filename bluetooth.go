@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 
@@ -146,52 +144,6 @@ func (bm *BluetoothManager) TrustDevice(mac string) error {
 	return nil
 }
 
-func (bm *BluetoothManager) RemoveDevice(mac string) error {
-	cmd := exec.Command("bluetoothctl", "remove", mac)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to remove device %s: %w, output: %s", mac, err, string(output))
-	}
-	return nil
-}
-
-func (bm *BluetoothManager) ScanForNewDevices() ([]BluetoothDevice, error) {
-	cmd := exec.Command("timeout", "10", "bluetoothctl", "scan", "on")
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start scan command: %w", err)
-	}
-
-	var newDevices []BluetoothDevice
-	scanner := bufio.NewScanner(stdout)
-	deviceRegex := regexp.MustCompile(`\[NEW\] Device ([A-Fa-f0-9:]{17}) (.*)`)
-
-	go func() {
-		for scanner.Scan() {
-			line := scanner.Text()
-			matches := deviceRegex.FindStringSubmatch(line)
-			if len(matches) == 3 {
-				device := BluetoothDevice{
-					MAC:  matches[1],
-					Name: matches[2],
-				}
-				newDevices = append(newDevices, device)
-			}
-		}
-	}()
-
-	_ = cmd.Wait() // Ignore error - scan might still have found devices
-
-	stopCmd := exec.Command("bluetoothctl", "scan", "off")
-	_ = stopCmd.Run() // Ignore error - scan stop failure is not critical
-
-	return newDevices, nil
-}
-
 func (bm *BluetoothManager) IsBluetoothEnabled() (bool, error) {
 	cmd := exec.Command("bluetoothctl", "show")
 	output, err := cmd.Output()
@@ -228,12 +180,14 @@ func (bm *BluetoothManager) DisableBluetooth() error {
 	return nil
 }
 
+// Bubble Tea command functions
+
 func getDevicesCmd() tea.Cmd {
 	return func() tea.Msg {
 		bm := NewBluetoothManager()
 		devices, err := bm.GetDevices()
 		if err != nil {
-			return []BluetoothDevice{}
+			return errorMsg{err: err}
 		}
 		return devices
 	}
@@ -244,7 +198,7 @@ func scanDevicesCmd() tea.Cmd {
 		bm := NewBluetoothManager()
 		devices, err := bm.ScanDevices()
 		if err != nil {
-			return scanCompleteMsg{devices: []BluetoothDevice{}}
+			return errorMsg{err: err}
 		}
 		return scanCompleteMsg{devices: devices}
 	}
@@ -253,10 +207,12 @@ func scanDevicesCmd() tea.Cmd {
 func connectDeviceCmd(mac string) tea.Cmd {
 	return func() tea.Msg {
 		bm := NewBluetoothManager()
-		err := bm.ConnectDevice(mac)
+		if err := bm.ConnectDevice(mac); err != nil {
+			return errorMsg{err: err}
+		}
 		return deviceStatusMsg{
 			deviceMAC: mac,
-			connected: err == nil,
+			connected: true,
 		}
 	}
 }
@@ -264,10 +220,12 @@ func connectDeviceCmd(mac string) tea.Cmd {
 func disconnectDeviceCmd(mac string) tea.Cmd {
 	return func() tea.Msg {
 		bm := NewBluetoothManager()
-		err := bm.DisconnectDevice(mac)
+		if err := bm.DisconnectDevice(mac); err != nil {
+			return errorMsg{err: err}
+		}
 		return deviceStatusMsg{
 			deviceMAC: mac,
-			connected: err != nil,
+			connected: false,
 		}
 	}
 }
@@ -275,10 +233,10 @@ func disconnectDeviceCmd(mac string) tea.Cmd {
 func pairDeviceCmd(mac string) tea.Cmd {
 	return func() tea.Msg {
 		bm := NewBluetoothManager()
-		err := bm.PairDevice(mac)
-		if err == nil {
-			_ = bm.TrustDevice(mac) // Ignore trust errors - pairing succeeded
+		if err := bm.PairDevice(mac); err != nil {
+			return errorMsg{err: err}
 		}
+		_ = bm.TrustDevice(mac)
 		return getDevicesCmd()()
 	}
 }
@@ -286,12 +244,12 @@ func pairDeviceCmd(mac string) tea.Cmd {
 func pairAndConnectDeviceCmd(mac string) tea.Cmd {
 	return func() tea.Msg {
 		bm := NewBluetoothManager()
-		err := bm.PairDevice(mac)
-		if err == nil {
-			_ = bm.TrustDevice(mac) // Ignore trust errors - pairing succeeded
-			time.Sleep(1 * time.Second)
-			_ = bm.ConnectDevice(mac) // Ignore connect errors - pairing/trust may have succeeded
+		if err := bm.PairDevice(mac); err != nil {
+			return errorMsg{err: err}
 		}
+		_ = bm.TrustDevice(mac)
+		time.Sleep(1 * time.Second)
+		_ = bm.ConnectDevice(mac)
 		return getDevicesCmd()()
 	}
 }
@@ -310,15 +268,19 @@ func getBluetoothStatusCmd() tea.Cmd {
 func enableBluetoothCmd() tea.Cmd {
 	return func() tea.Msg {
 		bm := NewBluetoothManager()
-		err := bm.EnableBluetooth()
-		return bluetoothStatusMsg{enabled: err == nil, error: err}
+		if err := bm.EnableBluetooth(); err != nil {
+			return errorMsg{err: err}
+		}
+		return bluetoothStatusMsg{enabled: true, error: nil}
 	}
 }
 
 func disableBluetoothCmd() tea.Cmd {
 	return func() tea.Msg {
 		bm := NewBluetoothManager()
-		err := bm.DisableBluetooth()
-		return bluetoothStatusMsg{enabled: err != nil, error: err}
+		if err := bm.DisableBluetooth(); err != nil {
+			return errorMsg{err: err}
+		}
+		return bluetoothStatusMsg{enabled: false, error: nil}
 	}
 }

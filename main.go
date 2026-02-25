@@ -7,10 +7,16 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+var (
+	version = "dev"     //nolint:unused // set via ldflags at build time
+	commit  = "none"    //nolint:unused // set via ldflags at build time
+	date    = "unknown" //nolint:unused // set via ldflags at build time
+)
+
 func main() {
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
-		fmt.Printf("Error running program: %v", err)
+		fmt.Fprintf(os.Stderr, "Error running program: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -20,7 +26,6 @@ func initialModel() Model {
 		devices:          []BluetoothDevice{},
 		cursor:           0,
 		scanning:         false,
-		selected:         make(map[int]struct{}),
 		width:            80,
 		height:           24,
 		bluetoothEnabled: false,

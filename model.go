@@ -8,6 +8,43 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+var (
+	titleStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FAFAFA")).
+			Background(lipgloss.Color("#7D56F4")).
+			Padding(0, 1).
+			Bold(true)
+
+	btOnStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#04B575"))
+
+	btOffStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FF5F56"))
+
+	scanStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#04B575")).
+			Bold(true)
+
+	disabledStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FF5F56")).
+			Italic(true)
+
+	noDevicesStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#626262")).
+			Italic(true)
+
+	helpStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#626262")).
+			MarginTop(2)
+
+	errorStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FF5F56")).
+			Bold(true).
+			MarginTop(1)
+)
+
 type BluetoothDevice struct {
 	MAC        string
 	Name       string
@@ -21,11 +58,11 @@ type Model struct {
 	devices          []BluetoothDevice
 	cursor           int
 	scanning         bool
-	selected         map[int]struct{}
 	width            int
 	height           int
 	bluetoothEnabled bool
 	bluetoothChecked bool
+	statusText       string
 }
 
 type scanCompleteMsg struct {
@@ -42,11 +79,14 @@ type bluetoothStatusMsg struct {
 	error   error
 }
 
+type errorMsg struct {
+	err error
+}
+
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		getDevicesCmd(),
 		getBluetoothStatusCmd(),
-		tea.EnterAltScreen,
 	)
 }
 
@@ -65,21 +105,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case scanCompleteMsg:
 		m.scanning = false
 		m.devices = msg.devices
+		m.statusText = ""
+		m.clampCursor()
 
 	case deviceStatusMsg:
 		return m.handleDeviceStatusMsg(msg)
 
 	case []BluetoothDevice:
 		m.devices = msg
+		m.statusText = ""
+		m.clampCursor()
 
 	case bluetoothStatusMsg:
 		return m.handleBluetoothStatusMsg(msg)
+
+	case errorMsg:
+		m.statusText = msg.err.Error()
 	}
 
 	return m, nil
 }
 
+func (m *Model) clampCursor() {
+	if m.cursor >= len(m.devices) {
+		m.cursor = max(0, len(m.devices)-1)
+	}
+}
+
+func (m Model) deviceListOffset() int {
+	offset := 2 // title + blank line
+	if m.bluetoothChecked {
+		offset++ // bluetooth status line
+	}
+	if m.scanning {
+		offset += 2 // scanning text + blank line
+	}
+	return offset
+}
+
 func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.statusText = ""
+
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
@@ -172,22 +238,25 @@ func (m Model) handleBluetoothToggle() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	switch msg.Action {
-	case tea.MouseActionPress:
-		if msg.Button == tea.MouseButtonWheelUp {
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		} else if msg.Button == tea.MouseButtonWheelDown {
-			if m.cursor < len(m.devices)-1 {
-				m.cursor++
-			}
-		} else if msg.Button == tea.MouseButtonLeft {
-			if msg.Y >= 3 && msg.Y < 3+len(m.devices) {
-				newCursor := msg.Y - 3
-				if newCursor >= 0 && newCursor < len(m.devices) {
-					m.cursor = newCursor
-				}
+	if msg.Action != tea.MouseActionPress {
+		return m, nil
+	}
+
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		if m.cursor > 0 {
+			m.cursor--
+		}
+	case tea.MouseButtonWheelDown:
+		if m.cursor < len(m.devices)-1 {
+			m.cursor++
+		}
+	case tea.MouseButtonLeft:
+		offset := m.deviceListOffset()
+		if msg.Y >= offset && msg.Y < offset+len(m.devices) {
+			newCursor := msg.Y - offset
+			if newCursor >= 0 && newCursor < len(m.devices) {
+				m.cursor = newCursor
 			}
 		}
 	}
@@ -208,6 +277,7 @@ func (m Model) handleBluetoothStatusMsg(msg bluetoothStatusMsg) (tea.Model, tea.
 	m.bluetoothEnabled = msg.enabled
 	m.bluetoothChecked = true
 	if msg.error == nil {
+		m.statusText = ""
 		return m, getDevicesCmd()
 	}
 	return m, nil
@@ -216,46 +286,28 @@ func (m Model) handleBluetoothStatusMsg(msg bluetoothStatusMsg) (tea.Model, tea.
 func (m Model) View() string {
 	var s strings.Builder
 
-	titleStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FAFAFA")).
-		Background(lipgloss.Color("#7D56F4")).
-		Padding(0, 1).
-		Bold(true)
-
 	s.WriteString(titleStyle.Render("HyprBluetooth - Bluetooth Device Manager"))
 	s.WriteString("\n")
 
 	if m.bluetoothChecked {
-		statusStyle := lipgloss.NewStyle().Bold(true)
 		if m.bluetoothEnabled {
-			statusStyle = statusStyle.Foreground(lipgloss.Color("#04B575"))
-			s.WriteString(statusStyle.Render("🔵 Bluetooth: ON"))
+			s.WriteString(btOnStyle.Render("🔵 Bluetooth: ON"))
 		} else {
-			statusStyle = statusStyle.Foreground(lipgloss.Color("#FF5F56"))
-			s.WriteString(statusStyle.Render("🔴 Bluetooth: OFF"))
+			s.WriteString(btOffStyle.Render("🔴 Bluetooth: OFF"))
 		}
 		s.WriteString("\n")
 	}
 	s.WriteString("\n")
 
 	if m.scanning {
-		scanStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#04B575")).
-			Bold(true)
 		s.WriteString(scanStyle.Render("🔍 Scanning for devices..."))
 		s.WriteString("\n\n")
 	}
 
 	if !m.bluetoothEnabled && m.bluetoothChecked {
-		disabledStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FF5F56")).
-			Italic(true)
 		s.WriteString(disabledStyle.Render("Bluetooth is disabled. Press 'e' to enable."))
 		s.WriteString("\n")
 	} else if len(m.devices) == 0 {
-		noDevicesStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#626262")).
-			Italic(true)
 		s.WriteString(noDevicesStyle.Render("No devices found. Press 's' to scan for devices."))
 		s.WriteString("\n")
 	} else {
@@ -298,9 +350,10 @@ func (m Model) View() string {
 		}
 	}
 
-	helpStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#626262")).
-		MarginTop(2)
+	if m.statusText != "" {
+		s.WriteString(errorStyle.Render("Error: " + m.statusText))
+		s.WriteString("\n")
+	}
 
 	help := `
 Controls:

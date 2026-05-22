@@ -1,204 +1,267 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-const bluetoothYes = "yes"
+const (
+	bluetoothYes         = "yes"
+	cmdTimeout           = 15 * time.Second
+	scanCmdTimeout       = 30 * time.Second
+	scanDuration         = 5 * time.Second
+	postPairConnectDelay = 1 * time.Second
+	infoFetchConcurrency = 4
+)
 
-type BluetoothManager struct{}
+var macRegex = regexp.MustCompile(`^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$`)
 
-func NewBluetoothManager() *BluetoothManager {
-	return &BluetoothManager{}
+// runBluetoothctl and runBluetoothctlCombined are overridable to enable testing.
+var runBluetoothctl = func(ctx context.Context, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "bluetoothctl", args...).Output()
 }
 
-func (bm *BluetoothManager) GetDevices() ([]BluetoothDevice, error) {
-	cmd := exec.Command("bluetoothctl", "devices")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get devices: %w", err)
+var runBluetoothctlCombined = func(ctx context.Context, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "bluetoothctl", args...).CombinedOutput()
+}
+
+type BluetoothDevice struct {
+	MAC       string
+	Name      string
+	Connected bool
+	Paired    bool
+	Trusted   bool
+}
+
+func validateMAC(mac string) error {
+	if !macRegex.MatchString(mac) {
+		return fmt.Errorf("invalid MAC address: %q", mac)
 	}
+	return nil
+}
 
-	lines := strings.Split(string(output), "\n")
-	devices := make([]BluetoothDevice, 0, len(lines))
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
+func parseDevicesOutput(b []byte) []BluetoothDevice {
+	var out []BluetoothDevice
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
 		if line == "" {
 			continue
 		}
-
 		parts := strings.SplitN(line, " ", 3)
 		if len(parts) < 2 || parts[0] != "Device" {
 			continue
 		}
-
 		mac := parts[1]
+		if !macRegex.MatchString(mac) {
+			continue
+		}
 		name := ""
 		if len(parts) > 2 {
 			name = parts[2]
 		}
-
-		device := BluetoothDevice{
-			MAC:  mac,
-			Name: name,
-		}
-
-		info, err := bm.GetDeviceInfo(mac)
-		if err == nil {
-			device.Connected = info.Connected
-			device.Paired = info.Paired
-			device.Trusted = info.Trusted
-			device.DeviceType = info.DeviceType
-		}
-
-		devices = append(devices, device)
+		out = append(out, BluetoothDevice{MAC: mac, Name: name})
 	}
+	return out
+}
 
+func parseDeviceInfo(b []byte, mac string) BluetoothDevice {
+	d := BluetoothDevice{MAC: mac}
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		switch {
+		case strings.HasPrefix(line, "Name: "):
+			d.Name = strings.TrimPrefix(line, "Name: ")
+		case strings.HasPrefix(line, "Connected: "):
+			d.Connected = strings.TrimPrefix(line, "Connected: ") == bluetoothYes
+		case strings.HasPrefix(line, "Paired: "):
+			d.Paired = strings.TrimPrefix(line, "Paired: ") == bluetoothYes
+		case strings.HasPrefix(line, "Trusted: "):
+			d.Trusted = strings.TrimPrefix(line, "Trusted: ") == bluetoothYes
+		}
+	}
+	return d
+}
+
+func parsePoweredStatus(b []byte) (bool, error) {
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if v, ok := strings.CutPrefix(line, "Powered: "); ok {
+			return v == bluetoothYes, nil
+		}
+	}
+	return false, errors.New("could not determine bluetooth status")
+}
+
+func getDeviceInfo(ctx context.Context, mac string) (BluetoothDevice, error) {
+	if err := validateMAC(mac); err != nil {
+		return BluetoothDevice{}, err
+	}
+	output, err := runBluetoothctl(ctx, "info", mac)
+	if err != nil {
+		return BluetoothDevice{}, fmt.Errorf("failed to get device info: %w", err)
+	}
+	return parseDeviceInfo(output, mac), nil
+}
+
+func getDevices(ctx context.Context) ([]BluetoothDevice, error) {
+	output, err := runBluetoothctl(ctx, "devices")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list devices: %w", err)
+	}
+	devices := parseDevicesOutput(output)
+
+	sem := make(chan struct{}, infoFetchConcurrency)
+	var wg sync.WaitGroup
+	for i := range devices {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			info, err := getDeviceInfo(ctx, devices[i].MAC)
+			if err != nil {
+				return
+			}
+			if info.Name != "" {
+				devices[i].Name = info.Name
+			}
+			devices[i].Connected = info.Connected
+			devices[i].Paired = info.Paired
+			devices[i].Trusted = info.Trusted
+		}(i)
+	}
+	wg.Wait()
 	return devices, nil
 }
 
-func (bm *BluetoothManager) GetDeviceInfo(mac string) (*BluetoothDevice, error) {
-	cmd := exec.Command("bluetoothctl", "info", mac)
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get device info: %w", err)
+// scanDevices toggles discovery on, waits, then toggles it off. The "off"
+// is always attempted even if the wait is canceled.
+func scanDevices(ctx context.Context) ([]BluetoothDevice, error) {
+	startCtx, cancelStart := context.WithTimeout(ctx, cmdTimeout)
+	defer cancelStart()
+	if output, err := runBluetoothctlCombined(startCtx, "scan", "on"); err != nil {
+		return nil, fmt.Errorf("failed to start scan: %w, output: %s", err, string(output))
 	}
 
-	device := &BluetoothDevice{MAC: mac}
-	lines := strings.Split(string(output), "\n")
+	defer func() {
+		// Use Background so we still stop scanning if the outer context is canceled.
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancelStop()
+		_, _ = runBluetoothctlCombined(stopCtx, "scan", "off")
+	}()
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-
-		if strings.HasPrefix(line, "Name: ") {
-			device.Name = strings.TrimPrefix(line, "Name: ")
-		} else if strings.HasPrefix(line, "Connected: ") {
-			device.Connected = strings.TrimPrefix(line, "Connected: ") == bluetoothYes
-		} else if strings.HasPrefix(line, "Paired: ") {
-			device.Paired = strings.TrimPrefix(line, "Paired: ") == bluetoothYes
-		} else if strings.HasPrefix(line, "Trusted: ") {
-			device.Trusted = strings.TrimPrefix(line, "Trusted: ") == bluetoothYes
-		} else if strings.HasPrefix(line, "Icon: ") {
-			device.DeviceType = strings.TrimPrefix(line, "Icon: ")
-		}
+	select {
+	case <-time.After(scanDuration):
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 
-	return device, nil
+	return getDevices(ctx)
 }
 
-func (bm *BluetoothManager) ScanDevices() ([]BluetoothDevice, error) {
-	startCmd := exec.Command("bluetoothctl", "scan", "on")
-	if err := startCmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to start scan: %w", err)
+func connectDevice(ctx context.Context, mac string) error {
+	if err := validateMAC(mac); err != nil {
+		return err
 	}
-
-	time.Sleep(5 * time.Second)
-
-	stopCmd := exec.Command("bluetoothctl", "scan", "off")
-	if err := stopCmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to stop scan: %w", err)
-	}
-
-	return bm.GetDevices()
-}
-
-func (bm *BluetoothManager) ConnectDevice(mac string) error {
-	cmd := exec.Command("bluetoothctl", "connect", mac)
-	output, err := cmd.CombinedOutput()
+	output, err := runBluetoothctlCombined(ctx, "connect", mac)
 	if err != nil {
 		return fmt.Errorf("failed to connect to device %s: %w, output: %s", mac, err, string(output))
 	}
 	return nil
 }
 
-func (bm *BluetoothManager) DisconnectDevice(mac string) error {
-	cmd := exec.Command("bluetoothctl", "disconnect", mac)
-	output, err := cmd.CombinedOutput()
+func disconnectDevice(ctx context.Context, mac string) error {
+	if err := validateMAC(mac); err != nil {
+		return err
+	}
+	output, err := runBluetoothctlCombined(ctx, "disconnect", mac)
 	if err != nil {
 		return fmt.Errorf("failed to disconnect from device %s: %w, output: %s", mac, err, string(output))
 	}
 	return nil
 }
 
-func (bm *BluetoothManager) PairDevice(mac string) error {
-	cmd := exec.Command("bluetoothctl", "pair", mac)
-	output, err := cmd.CombinedOutput()
+func pairDevice(ctx context.Context, mac string) error {
+	if err := validateMAC(mac); err != nil {
+		return err
+	}
+	output, err := runBluetoothctlCombined(ctx, "pair", mac)
 	if err != nil {
 		return fmt.Errorf("failed to pair with device %s: %w, output: %s", mac, err, string(output))
 	}
 	return nil
 }
 
-func (bm *BluetoothManager) TrustDevice(mac string) error {
-	cmd := exec.Command("bluetoothctl", "trust", mac)
-	output, err := cmd.CombinedOutput()
+func trustDevice(ctx context.Context, mac string) error {
+	if err := validateMAC(mac); err != nil {
+		return err
+	}
+	output, err := runBluetoothctlCombined(ctx, "trust", mac)
 	if err != nil {
 		return fmt.Errorf("failed to trust device %s: %w, output: %s", mac, err, string(output))
 	}
 	return nil
 }
 
-func (bm *BluetoothManager) IsBluetoothEnabled() (bool, error) {
-	cmd := exec.Command("bluetoothctl", "show")
-	output, err := cmd.Output()
+func isBluetoothEnabled(ctx context.Context) (bool, error) {
+	output, err := runBluetoothctl(ctx, "show")
 	if err != nil {
 		return false, fmt.Errorf("failed to get bluetooth status: %w", err)
 	}
-
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Powered: ") {
-			return strings.TrimPrefix(line, "Powered: ") == "yes", nil
-		}
-	}
-
-	return false, fmt.Errorf("could not determine bluetooth status")
+	return parsePoweredStatus(output)
 }
 
-func (bm *BluetoothManager) EnableBluetooth() error {
-	cmd := exec.Command("bluetoothctl", "power", "on")
-	output, err := cmd.CombinedOutput()
+func enableBluetooth(ctx context.Context) error {
+	output, err := runBluetoothctlCombined(ctx, "power", "on")
 	if err != nil {
 		return fmt.Errorf("failed to enable bluetooth: %w, output: %s", err, string(output))
 	}
 	return nil
 }
 
-func (bm *BluetoothManager) DisableBluetooth() error {
-	cmd := exec.Command("bluetoothctl", "power", "off")
-	output, err := cmd.CombinedOutput()
+func disableBluetooth(ctx context.Context) error {
+	output, err := runBluetoothctlCombined(ctx, "power", "off")
 	if err != nil {
 		return fmt.Errorf("failed to disable bluetooth: %w, output: %s", err, string(output))
 	}
 	return nil
 }
 
-// Bubble Tea command functions
+// Bubble Tea command factories
 
 func getDevicesCmd() tea.Cmd {
 	return func() tea.Msg {
-		bm := NewBluetoothManager()
-		devices, err := bm.GetDevices()
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		devices, err := getDevices(ctx)
 		if err != nil {
 			return errorMsg{err: err}
 		}
-		return devices
+		return devicesMsg{devices: devices}
 	}
 }
 
 func scanDevicesCmd() tea.Cmd {
 	return func() tea.Msg {
-		bm := NewBluetoothManager()
-		devices, err := bm.ScanDevices()
+		ctx, cancel := context.WithTimeout(context.Background(), scanCmdTimeout)
+		defer cancel()
+		devices, err := scanDevices(ctx)
 		if err != nil {
-			return errorMsg{err: err}
+			return scanCompleteMsg{err: err}
 		}
 		return scanCompleteMsg{devices: devices}
 	}
@@ -206,81 +269,100 @@ func scanDevicesCmd() tea.Cmd {
 
 func connectDeviceCmd(mac string) tea.Cmd {
 	return func() tea.Msg {
-		bm := NewBluetoothManager()
-		if err := bm.ConnectDevice(mac); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		if err := connectDevice(ctx, mac); err != nil {
 			return errorMsg{err: err}
 		}
-		return deviceStatusMsg{
-			deviceMAC: mac,
-			connected: true,
-		}
+		return deviceStatusMsg{deviceMAC: mac, connected: true}
 	}
 }
 
 func disconnectDeviceCmd(mac string) tea.Cmd {
 	return func() tea.Msg {
-		bm := NewBluetoothManager()
-		if err := bm.DisconnectDevice(mac); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		if err := disconnectDevice(ctx, mac); err != nil {
 			return errorMsg{err: err}
 		}
-		return deviceStatusMsg{
-			deviceMAC: mac,
-			connected: false,
-		}
+		return deviceStatusMsg{deviceMAC: mac, connected: false}
 	}
 }
 
 func pairDeviceCmd(mac string) tea.Cmd {
 	return func() tea.Msg {
-		bm := NewBluetoothManager()
-		if err := bm.PairDevice(mac); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		if err := pairDevice(ctx, mac); err != nil {
 			return errorMsg{err: err}
 		}
-		_ = bm.TrustDevice(mac)
-		return getDevicesCmd()()
+		if err := trustDevice(ctx, mac); err != nil {
+			return errorMsg{err: fmt.Errorf("paired but failed to trust: %w", err)}
+		}
+		devices, err := getDevices(ctx)
+		if err != nil {
+			return errorMsg{err: err}
+		}
+		return devicesMsg{devices: devices}
 	}
 }
 
 func pairAndConnectDeviceCmd(mac string) tea.Cmd {
 	return func() tea.Msg {
-		bm := NewBluetoothManager()
-		if err := bm.PairDevice(mac); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), scanCmdTimeout)
+		defer cancel()
+		if err := pairDevice(ctx, mac); err != nil {
 			return errorMsg{err: err}
 		}
-		_ = bm.TrustDevice(mac)
-		time.Sleep(1 * time.Second)
-		_ = bm.ConnectDevice(mac)
-		return getDevicesCmd()()
+		if err := trustDevice(ctx, mac); err != nil {
+			return errorMsg{err: fmt.Errorf("paired but failed to trust: %w", err)}
+		}
+		select {
+		case <-time.After(postPairConnectDelay):
+		case <-ctx.Done():
+			return errorMsg{err: ctx.Err()}
+		}
+		if err := connectDevice(ctx, mac); err != nil {
+			return errorMsg{err: fmt.Errorf("paired but failed to connect: %w", err)}
+		}
+		devices, err := getDevices(ctx)
+		if err != nil {
+			return errorMsg{err: err}
+		}
+		return devicesMsg{devices: devices}
 	}
 }
 
 func getBluetoothStatusCmd() tea.Cmd {
 	return func() tea.Msg {
-		bm := NewBluetoothManager()
-		enabled, err := bm.IsBluetoothEnabled()
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		enabled, err := isBluetoothEnabled(ctx)
 		if err != nil {
-			return bluetoothStatusMsg{enabled: false, error: err}
+			return bluetoothStatusMsg{enabled: false, err: err}
 		}
-		return bluetoothStatusMsg{enabled: enabled, error: nil}
+		return bluetoothStatusMsg{enabled: enabled}
 	}
 }
 
 func enableBluetoothCmd() tea.Cmd {
 	return func() tea.Msg {
-		bm := NewBluetoothManager()
-		if err := bm.EnableBluetooth(); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		if err := enableBluetooth(ctx); err != nil {
 			return errorMsg{err: err}
 		}
-		return bluetoothStatusMsg{enabled: true, error: nil}
+		return bluetoothStatusMsg{enabled: true}
 	}
 }
 
 func disableBluetoothCmd() tea.Cmd {
 	return func() tea.Msg {
-		bm := NewBluetoothManager()
-		if err := bm.DisableBluetooth(); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		if err := disableBluetooth(ctx); err != nil {
 			return errorMsg{err: err}
 		}
-		return bluetoothStatusMsg{enabled: false, error: nil}
+		return bluetoothStatusMsg{enabled: false}
 	}
 }

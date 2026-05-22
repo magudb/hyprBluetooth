@@ -43,16 +43,13 @@ var (
 			Foreground(lipgloss.Color("#FF5F56")).
 			Bold(true).
 			MarginTop(1)
-)
 
-type BluetoothDevice struct {
-	MAC        string
-	Name       string
-	Connected  bool
-	Paired     bool
-	Trusted    bool
-	DeviceType string
-}
+	cursorRowStyle = lipgloss.NewStyle().Background(lipgloss.Color("#383838"))
+
+	statusConnectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
+	statusPairedStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFA500"))
+	statusUnpairedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#626262"))
+)
 
 type Model struct {
 	devices          []BluetoothDevice
@@ -65,8 +62,13 @@ type Model struct {
 	statusText       string
 }
 
+type devicesMsg struct {
+	devices []BluetoothDevice
+}
+
 type scanCompleteMsg struct {
 	devices []BluetoothDevice
+	err     error
 }
 
 type deviceStatusMsg struct {
@@ -76,7 +78,7 @@ type deviceStatusMsg struct {
 
 type bluetoothStatusMsg struct {
 	enabled bool
-	error   error
+	err     error
 }
 
 type errorMsg struct {
@@ -104,15 +106,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case scanCompleteMsg:
 		m.scanning = false
-		m.devices = msg.devices
-		m.statusText = ""
+		if msg.err != nil {
+			m.statusText = msg.err.Error()
+		} else {
+			m.devices = msg.devices
+			m.statusText = ""
+		}
 		m.clampCursor()
 
 	case deviceStatusMsg:
 		return m.handleDeviceStatusMsg(msg)
 
-	case []BluetoothDevice:
-		m.devices = msg
+	case devicesMsg:
+		m.devices = msg.devices
 		m.statusText = ""
 		m.clampCursor()
 
@@ -197,11 +203,12 @@ func (m Model) handleDeviceAction() (tea.Model, tea.Cmd) {
 	}
 
 	device := m.devices[m.cursor]
-	if device.Connected {
+	switch {
+	case device.Connected:
 		return m, disconnectDeviceCmd(device.MAC)
-	} else if device.Paired {
+	case device.Paired:
 		return m, connectDeviceCmd(device.MAC)
-	} else {
+	default:
 		return m, pairAndConnectDeviceCmd(device.MAC)
 	}
 }
@@ -230,9 +237,8 @@ func (m Model) handleBluetoothToggle() (tea.Model, tea.Cmd) {
 	if m.bluetoothChecked {
 		if m.bluetoothEnabled {
 			return m, disableBluetoothCmd()
-		} else {
-			return m, enableBluetoothCmd()
 		}
+		return m, enableBluetoothCmd()
 	}
 	return m, nil
 }
@@ -274,10 +280,14 @@ func (m Model) handleDeviceStatusMsg(msg deviceStatusMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleBluetoothStatusMsg(msg bluetoothStatusMsg) (tea.Model, tea.Cmd) {
-	m.bluetoothEnabled = msg.enabled
 	m.bluetoothChecked = true
-	if msg.error == nil {
-		m.statusText = ""
+	if msg.err != nil {
+		m.statusText = msg.err.Error()
+		return m, nil
+	}
+	m.bluetoothEnabled = msg.enabled
+	m.statusText = ""
+	if msg.enabled {
 		return m, getDevicesCmd()
 	}
 	return m, nil
@@ -304,7 +314,7 @@ func (m Model) View() string {
 		s.WriteString("\n\n")
 	}
 
-	if !m.bluetoothEnabled && m.bluetoothChecked {
+	if m.bluetoothChecked && !m.bluetoothEnabled {
 		s.WriteString(disabledStyle.Render("Bluetooth is disabled. Press 'e' to enable."))
 		s.WriteString("\n")
 	} else if len(m.devices) == 0 {
@@ -317,35 +327,33 @@ func (m Model) View() string {
 				cursor = ">"
 			}
 
-			status := "○"
-			statusColor := "#626262"
-			if device.Connected {
-				status = "●"
-				statusColor = "#04B575"
-			} else if device.Paired {
-				status = "◐"
-				statusColor = "#FFA500"
+			var glyph string
+			var style lipgloss.Style
+			switch {
+			case device.Connected:
+				glyph, style = "●", statusConnectedStyle
+			case device.Paired:
+				glyph, style = "◐", statusPairedStyle
+			default:
+				glyph, style = "○", statusUnpairedStyle
 			}
-
-			statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor))
 
 			deviceName := device.Name
 			if deviceName == "" {
 				deviceName = "Unknown Device"
 			}
 
-			itemStyle := lipgloss.NewStyle()
-			if m.cursor == i {
-				itemStyle = itemStyle.Background(lipgloss.Color("#383838"))
-			}
-
 			line := fmt.Sprintf("%s %s %s (%s)",
 				cursor,
-				statusStyle.Render(status),
+				style.Render(glyph),
 				deviceName,
 				device.MAC)
 
-			s.WriteString(itemStyle.Render(line))
+			if m.cursor == i {
+				line = cursorRowStyle.Render(line)
+			}
+
+			s.WriteString(line)
 			s.WriteString("\n")
 		}
 	}
